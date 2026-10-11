@@ -1,0 +1,2 @@
+[functions.sports-sync]
+verify_jwt = false
