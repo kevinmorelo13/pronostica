@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { ArrowRight, Check, RefreshCw, ShieldCheck, Sparkles, Ticket } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { getBogotaDateRange, getTodayBogota } from '@/lib/utils';
+import { estimatedOdds, BOOKMAKER_MARGIN } from '@/lib/betting';
 
 type ComboRow = {
   id: string;
@@ -21,14 +22,6 @@ type ComboRow = {
 type ComboSelection = ComboRow & { odds: number };
 type ComboTicket = { selections: ComboSelection[]; product: number };
 
-const BOOKMAKER_MARGIN = 0.06;
-
-function estimatedOdds(probability: number): number {
-  const fairOdds = 100 / probability;
-  const adjusted = fairOdds / (1 + BOOKMAKER_MARGIN);
-  return Math.max(1.05, Number(adjusted.toFixed(2)));
-}
-
 function addDays(date: string, days: number): string {
   const next = new Date(`${date}T12:00:00-05:00`);
   next.setDate(next.getDate() + days);
@@ -37,8 +30,8 @@ function addDays(date: string, days: number): string {
 
 function ticketFromRows(rows: ComboRow[], excludedIds: Set<string>): ComboTicket {
   const selections = rows
-    .filter((row) => !excludedIds.has(row.match_id) && row.best_bet && (row.best_bet_probability ?? 0) >= 50)
-    .slice(0, 2)
+    .filter((row) => !excludedIds.has(row.match_id) && row.best_bet && (row.best_bet_probability ?? 0) >= 45)
+    .slice(0, 3)
     .map((row) => ({ ...row, odds: estimatedOdds(row.best_bet_probability ?? 0) }));
 
   return {
@@ -68,7 +61,7 @@ function TicketCard({ ticket, number }: { ticket: ComboTicket; number: number })
       </div>
       <div className="divide-y divide-white/10">
         {ticket.selections.length === 0 ? (
-          <p className="py-10 text-sm text-neutral-300">No hay dos pronósticos válidos disponibles para este ticket.</p>
+          <p className="py-10 text-sm text-neutral-300">No hay pronósticos disponibles para este ticket todavía.</p>
         ) : ticket.selections.map((row) => {
           const match = row.match;
           return (
@@ -101,22 +94,41 @@ export default function CombosPage() {
     const { start } = getBogotaDateRange(today);
     const { end } = getBogotaDateRange(addDays(today, 2));
     const { data } = await supabase
-      .from('predictions')
+      .from('matches')
       .select(`
-        id, match_id, best_bet, best_bet_probability, confidence,
-        match:matches!predictions_match_id_fkey(
-          match_date,
-          league:leagues(name),
-          home_team:teams!matches_home_team_id_fkey(short_name, name),
-          away_team:teams!matches_away_team_id_fkey(short_name, name)
-        )
+        id, match_date, status,
+        league:leagues(name),
+        home_team:teams!matches_home_team_id_fkey(short_name, name),
+        away_team:teams!matches_away_team_id_fkey(short_name, name),
+        prediction:predictions(id, match_id, best_bet, best_bet_probability, confidence, has_signal)
       `)
-      .gte('match.match_date', start)
-      .lte('match.match_date', end)
-      .in('confidence', ['very_high', 'high'])
-      .order('best_bet_probability', { ascending: false })
-      .limit(20);
-    setRows(((data ?? []) as unknown as ComboRow[]).filter((row) => row.match != null));
+      .gte('match_date', start)
+      .lte('match_date', end)
+      .in('status', ['scheduled', 'live', 'halftime'])
+      .order('match_date', { ascending: true })
+      .limit(80);
+
+    const mapped = ((data ?? []) as any[])
+      .map((match) => {
+        const prediction = Array.isArray(match.prediction) ? match.prediction[0] : match.prediction;
+        if (!prediction?.best_bet) return null;
+        return {
+          id: prediction.id,
+          match_id: match.id,
+          best_bet: prediction.best_bet,
+          best_bet_probability: prediction.best_bet_probability,
+          confidence: prediction.confidence,
+          match: {
+            match_date: match.match_date,
+            league: match.league,
+            home_team: match.home_team,
+            away_team: match.away_team,
+          },
+        } as ComboRow;
+      })
+      .filter((row): row is ComboRow => row != null)
+      .sort((a, b) => (b.best_bet_probability ?? 0) - (a.best_bet_probability ?? 0));
+    setRows(mapped);
     setUpdatedAt(new Date());
     setLoading(false);
   };
@@ -166,7 +178,7 @@ export default function CombosPage() {
             </div>
           </div>
         </section>
-        <p className="text-center text-xs text-neutral-600">Las cuotas mostradas incluyen un margen de approximately 6%, similar al de casas de apuestas. Las probabilidades son estimaciones estadísticas y no garantizan resultados.</p>
+        <p className="text-center text-xs text-neutral-600">Las cuotas mostradas incluyen un margen de aproximadamente {(BOOKMAKER_MARGIN * 100).toFixed(0)}%, similar al de casas de apuestas. Las probabilidades son estimaciones estadísticas y no garantizan resultados.</p>
       </div>
     </div>
   );

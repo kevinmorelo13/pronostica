@@ -3,6 +3,7 @@ import {
   confidenceBg, confidenceLabel, toLocaleTimeString,
   toLocaleDateString, statusLabel, statusColor, getOutcomeLabel, getFormChar,
 } from '@/lib/utils';
+import { estimatedOdds } from '@/lib/betting';
 import { X, MapPin, User, Clock, Zap, TrendingUp, Info, Ban, Layers, Gauge, Brain, Target } from 'lucide-react';
 import EntityLogo from '@/components/EntityLogo';
 import { useState, useEffect } from 'react';
@@ -228,9 +229,12 @@ export default function MatchDetailModal({ match, prediction, homeStats, awaySta
                     {prediction.best_bet ?? getOutcomeLabel(prediction, home?.name ?? 'Local', away?.name ?? 'Visitante')}
                   </p>
                   {prediction.best_bet_probability != null && (
-                    <span className="text-3xl font-bold text-neutral-900">
-                      {prediction.best_bet_probability.toFixed(0)}%
-                    </span>
+                    <div className="text-right">
+                      <span className="block text-3xl font-bold text-neutral-900">
+                        {prediction.best_bet_probability.toFixed(0)}%
+                      </span>
+                      <span className="text-xs font-bold text-neutral-600">Cuota {estimatedOdds(prediction.best_bet_probability).toFixed(2)}</span>
+                    </div>
                   )}
                 </div>
                 {prediction.best_bet_market && (
@@ -241,9 +245,12 @@ export default function MatchDetailModal({ match, prediction, homeStats, awaySta
                     Marcador estimado: <span className="text-neutral-900 font-semibold">{prediction.predicted_home_score} - {prediction.predicted_away_score}</span>
                   </p>
                 )}
-                {isFinished && prediction.prediction_result !== 'pending' && (
-                  <p className={`mt-3 rounded-lg px-3 py-2 text-sm font-bold ${prediction.prediction_result === 'correct' ? 'bg-[#c7ff00]/25 text-neutral-900' : 'bg-red-50 text-red-600'}`}>
-                    {prediction.prediction_result === 'correct' ? 'ACIERTO' : 'NO ACERTÓ'} · Apuesta principal: {prediction.best_bet ?? 'Sin selección'} · Resultado: {prediction.actual_outcome ?? 'Sin dato'}
+                {isFinished && (
+                  <p className={`mt-3 rounded-lg px-3 py-2 text-sm font-bold ${prediction.prediction_result === 'correct' ? 'bg-[#c7ff00]/25 text-neutral-900' : prediction.prediction_result === 'incorrect' ? 'bg-red-50 text-red-600' : 'bg-neutral-100 text-neutral-600'}`}>
+                    {prediction.prediction_result === 'correct' ? 'GANADA' : prediction.prediction_result === 'incorrect' ? 'PERDIDA' : 'PENDIENTE'}
+                    {' · '}Apuesta: {prediction.best_bet ?? 'Sin selección'}
+                    {prediction.best_bet_probability != null ? ` · Cuota ${estimatedOdds(prediction.best_bet_probability).toFixed(2)}` : ''}
+                    {prediction.actual_outcome ? ` · ${prediction.actual_outcome}` : ''}
                   </p>
                 )}
               </div>

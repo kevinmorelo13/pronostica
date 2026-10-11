@@ -3,6 +3,7 @@ import {
   toLocaleTimeString, statusLabel, confidenceBg, confidenceLabel,
   getOutcomeLabel,
 } from '@/lib/utils';
+import { estimatedOdds } from '@/lib/betting';
 import { ChevronRight, Clock, Zap, Ban, Gauge, Check, X } from 'lucide-react';
 import EntityLogo from '@/components/EntityLogo';
 
@@ -122,15 +123,23 @@ export default function MatchCard({ match, onClick }: Props) {
               <div className="flex items-center justify-between rounded-lg border border-black/10 bg-neutral-100 px-3 py-2">
                 <div className="min-w-0">
                   <span className="block truncate text-sm font-bold tracking-tight text-neutral-900">{pred.best_bet ?? topOutcome}</span>
-                  <span className="mt-1 block truncate text-[10px] text-neutral-600">Modelo oficial: {pred.model_version?.replace('official_', '') ?? 'No disponible'}</span>
+                  <span className="mt-1 block truncate text-[10px] text-neutral-600">
+                    {pred.best_bet_probability != null ? `Cuota ${estimatedOdds(pred.best_bet_probability).toFixed(2)} · ` : ''}
+                    Modelo: {pred.model_version?.replace('official_', '') ?? 'No disponible'}
+                  </span>
                 </div>
-                {pred.best_bet_probability != null && <span className="text-lg font-black text-neutral-900">{pred.best_bet_probability.toFixed(0)}%</span>}
+                <div className="ml-2 text-right">
+                  {pred.best_bet_probability != null && <span className="block text-lg font-black text-neutral-900">{pred.best_bet_probability.toFixed(0)}%</span>}
+                  {pred.best_bet_probability != null && (
+                    <span className="text-[10px] font-bold text-neutral-600">{estimatedOdds(pred.best_bet_probability).toFixed(2)}</span>
+                  )}
+                </div>
               </div>
-              {isFinished && pred.prediction_result !== 'pending' && (
-                <div className={`mt-2 flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-bold ${pred.prediction_result === 'correct' ? 'border-[#c7ff00] bg-[#c7ff00]/20 text-neutral-900' : 'border-red-300 bg-red-50 text-red-600'}`}>
-                  {pred.prediction_result === 'correct' ? <Check size={14} /> : <X size={14} />}
-                  {pred.prediction_result === 'correct' ? 'ACIERTO' : 'NO ACERTÓ'}
-                  <span className="font-medium text-neutral-500">· Principal: {pred.best_bet ?? 'Sin selección'} · Resultado: {pred.actual_outcome ?? 'Pendiente'}</span>
+              {isFinished && (
+                <div className={`mt-2 flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-bold ${pred.prediction_result === 'correct' ? 'border-[#c7ff00] bg-[#c7ff00]/20 text-neutral-900' : pred.prediction_result === 'incorrect' ? 'border-red-300 bg-red-50 text-red-600' : 'border-neutral-200 bg-neutral-50 text-neutral-600'}`}>
+                  {pred.prediction_result === 'correct' ? <Check size={14} /> : pred.prediction_result === 'incorrect' ? <X size={14} /> : <Clock size={14} />}
+                  {pred.prediction_result === 'correct' ? 'GANADA' : pred.prediction_result === 'incorrect' ? 'PERDIDA' : 'PENDIENTE'}
+                  <span className="font-medium text-neutral-500">· {pred.best_bet ?? 'Sin selección'}{pred.actual_outcome ? ` · ${pred.actual_outcome}` : ''}</span>
                 </div>
               )}
             </>

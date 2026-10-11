@@ -966,16 +966,18 @@ function formScore(form: string | null): number {
 // ============================================================
 
 async function generatePredictions(date: string): Promise<number> {
+  const next = new Date(`${date}T05:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
   const start = `${date}T00:00:00.000Z`;
-  const end = `${date}T23:59:59.999Z`;
+  const end = `${next.toISOString().slice(0, 10)}T04:59:59.999Z`;
   const seasonYear = getSeasonYear(date);
 
   const { data: matches, error } = await supabase
     .from("matches")
     .select(`
       id, home_team_id, away_team_id, league_id,
-      home_team:teams!matches_home_team_id_fkey(id, api_id),
-      away_team:teams!matches_away_team_id_fkey(id, api_id),
+      home_team:teams!matches_home_team_id_fkey(id, api_id, name, short_name),
+      away_team:teams!matches_away_team_id_fkey(id, api_id, name, short_name),
       league:leagues(id, api_id, season)
     `)
     .gte("match_date", start)
@@ -1335,18 +1337,16 @@ async function generatePredictions(date: string): Promise<number> {
       },
     };
 
-    // The official bet picks the highest-probability market from the ensemble,
-    // but only if models agree on the 1X2 outcome. If models disagree on 1X2,
-    // fall back to the best goal-market bet (Over/Under, BTTS) which tends to
-    // be more stable across models.
+    // Official bet: highest-probability market that can be settled from the
+    // final score (ESPN). Corners/cards/shots stay in additional markets only.
     const officialModel = allModels.reduce((best, model) => model.weight > best.weight ? model : best, allModels[0]);
-    // Rotate the featured market so the feed is not limited to 1X2 and basic goals.
-    const marketOrder = ["Goles", "Doble oportunidad", "Corners", "Tarjetas", "Disparos", "Disparos a puerta", "Resultado"];
-    const rotationSeed = [...m.id].reduce((sum, character) => sum + character.charCodeAt(0), 0);
-    const preferredMarket = marketOrder[rotationSeed % marketOrder.length];
-    const marketBets = allBets.filter((bet) => bet.market === preferredMarket);
-    const candidates = marketBets.length > 0 ? marketBets : allBets;
-    const bestBet = candidates.reduce((best, bet) => bet.prob > best.prob ? bet : best, candidates[0]);
+    const scoreMarkets = new Set(["1X2", "Doble oportunidad", "Goles", "Resultado"]);
+    const settleable = allBets.filter((bet) => scoreMarkets.has(bet.market) && bet.prob > 0);
+    const candidates = settleable.length > 0 ? settleable : allBets.filter((bet) => scoreMarkets.has(bet.market));
+    const bestBet = (candidates.length > 0 ? candidates : allBets).reduce(
+      (best, bet) => bet.prob > best.prob ? bet : best,
+      (candidates.length > 0 ? candidates : allBets)[0],
+    );
     const bestBetLabel = bestBet.label;
     const bestBetProb = Number(bestBet.prob.toFixed(1));
     const bestBetMarket = bestBet.market;
@@ -1493,38 +1493,67 @@ async function syncLiveMatches(): Promise<number> {
 // Evaluate the single primary bet selected for each prediction
 // ============================================================
 
-function evaluatePrimaryBet(label: string | null, homeScore: number, awayScore: number, homeName: string, awayName: string): { correct: boolean; actual: string } {
+function normalizeBetText(value: string): string {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function evaluatePrimaryBet(
+  label: string | null,
+  homeScore: number,
+  awayScore: number,
+  homeName: string,
+  awayName: string,
+): { verifiable: boolean; correct: boolean; actual: string } {
   const totalGoals = homeScore + awayScore;
-  const actualResult = homeScore > awayScore ? "Victoria local" : awayScore > homeScore ? "Victoria visitante" : "Empate";
-  if (!label) return { correct: false, actual: actualResult };
-  // 1X2
-  if (label === "Empate") return { correct: homeScore === awayScore, actual: actualResult };
-  if (label === `Victoria ${homeName}`) return { correct: homeScore > awayScore, actual: actualResult };
-  if (label === `Victoria ${awayName}`) return { correct: awayScore > homeScore, actual: actualResult };
-  // Doble oportunidad
-  if (label === `Doble oportunidad ${homeName} o Empate`) return { correct: homeScore >= awayScore, actual: actualResult };
-  if (label === `Doble oportunidad Empate o ${awayName}`) return { correct: awayScore >= homeScore, actual: actualResult };
-  if (label === `Doble oportunidad ${homeName} o ${awayName}`) return { correct: homeScore !== awayScore, actual: actualResult };
-  // Goles Over/Under
-  if (label === "Más de 0.5 goles") return { correct: totalGoals > 0, actual: `${totalGoals} goles` };
-  if (label === "Menos de 0.5 goles") return { correct: totalGoals === 0, actual: `${totalGoals} goles` };
-  if (label === "Más de 1.5 goles") return { correct: totalGoals > 1, actual: `${totalGoals} goles` };
-  if (label === "Menos de 1.5 goles") return { correct: totalGoals <= 1, actual: `${totalGoals} goles` };
-  if (label === "Más de 2.5 goles") return { correct: totalGoals > 2, actual: `${totalGoals} goles` };
-  if (label === "Menos de 2.5 goles") return { correct: totalGoals <= 2, actual: `${totalGoals} goles` };
-  if (label === "Más de 3.5 goles") return { correct: totalGoals > 3, actual: `${totalGoals} goles` };
-  if (label === "Más de 4.5 goles") return { correct: totalGoals > 4, actual: `${totalGoals} goles` };
-  if (label === "Menos de 4.5 goles") return { correct: totalGoals <= 4, actual: `${totalGoals} goles` };
-  if (label === "Ambos equipos marcan") return { correct: homeScore > 0 && awayScore > 0, actual: `${homeScore}-${awayScore}` };
-  if (label === "Ambos no marcan") return { correct: homeScore === 0 || awayScore === 0, actual: `${homeScore}-${awayScore}` };
-  const exactScore = label.match(/Resultado exacto (\d+)-(\d+)/);
-  if (exactScore) return { correct: homeScore === Number(exactScore[1]) && awayScore === Number(exactScore[2]), actual: `${homeScore}-${awayScore}` };
-  // Corners, Tarjetas, Disparos, Disparos a puerta: cannot evaluate without match stats
-  // These are marked as correct=false (unknown) and will not count against model performance
-  if (label.includes("corners") || label.includes("tarjetas") || label.includes("disparos")) {
-    return { correct: false, actual: "No verificable" };
+  const actualResult = homeScore > awayScore ? `Victoria ${homeName}` : awayScore > homeScore ? `Victoria ${awayName}` : "Empate";
+  if (!label) return { verifiable: false, correct: false, actual: actualResult };
+
+  const n = normalizeBetText(label);
+  if (n.includes("corner") || n.includes("tarjeta") || n.includes("disparo")) {
+    return { verifiable: false, correct: false, actual: "No verificable con el marcador" };
   }
-  return { correct: false, actual: actualResult };
+
+  const home = normalizeBetText(homeName);
+  const away = normalizeBetText(awayName);
+
+  if (n === "empate") return { verifiable: true, correct: homeScore === awayScore, actual: actualResult };
+  if (n === `victoria ${home}` || n === "victoria local") return { verifiable: true, correct: homeScore > awayScore, actual: actualResult };
+  if (n === `victoria ${away}` || n === "victoria visitante") return { verifiable: true, correct: awayScore > homeScore, actual: actualResult };
+
+  const isDoubleChance = n.includes("doble oportunidad") || n.startsWith("1x") || n.startsWith("x2") || n.startsWith("12");
+  if (isDoubleChance) {
+    if (n.includes("12") || (n.includes(home) && n.includes(away))) {
+      return { verifiable: true, correct: homeScore !== awayScore, actual: actualResult };
+    }
+    if (n.startsWith("1x") || (n.includes(home) && n.includes("empate"))) {
+      return { verifiable: true, correct: homeScore >= awayScore, actual: actualResult };
+    }
+    if (n.startsWith("x2") || (n.includes(away) && n.includes("empate"))) {
+      return { verifiable: true, correct: awayScore >= homeScore, actual: actualResult };
+    }
+  }
+
+  if (n.includes("ambos") && (n.includes("marcan") || n.includes("marca"))) {
+    const bothScore = homeScore > 0 && awayScore > 0;
+    const wantsBoth = !n.includes("no marcan") && !n.includes("no marca");
+    return { verifiable: true, correct: wantsBoth ? bothScore : !bothScore, actual: `${homeScore}-${awayScore}` };
+  }
+
+  const exactScore = n.match(/resultado exacto (\d+)\s*-\s*(\d+)/);
+  if (exactScore) {
+    return {
+      verifiable: true,
+      correct: homeScore === Number(exactScore[1]) && awayScore === Number(exactScore[2]),
+      actual: `${homeScore}-${awayScore}`,
+    };
+  }
+
+  const over = n.match(/mas de (\d+(?:\.\d+)?)/);
+  const under = n.match(/menos de (\d+(?:\.\d+)?)/);
+  if (over) return { verifiable: true, correct: totalGoals > Number(over[1]), actual: `${totalGoals} goles` };
+  if (under) return { verifiable: true, correct: totalGoals < Number(under[1]), actual: `${totalGoals} goles` };
+
+  return { verifiable: false, correct: false, actual: actualResult };
 }
 
 async function evaluatePredictionResults(): Promise<number> {
@@ -1545,6 +1574,7 @@ async function evaluatePredictionResults(): Promise<number> {
     const homeName = match.home_team?.name ?? "Local";
     const awayName = match.away_team?.name ?? "Visitante";
     const evaluation = evaluatePrimaryBet(prediction.best_bet, homeScore, awayScore, homeName, awayName);
+    if (!evaluation.verifiable) continue;
     const actual = homeScore > awayScore ? "home" : awayScore > homeScore ? "away" : "draw";
 
     await supabase.from("predictions").update({
@@ -1613,7 +1643,50 @@ async function evaluatePredictionResults(): Promise<number> {
     }
   }
 
+  try {
+    await evaluateLadderEntries();
+  } catch (e) {
+    console.error(`ladder evaluate: ${(e as Error).message}`);
+  }
   return evaluated;
+}
+
+async function evaluateLadderEntries(): Promise<number> {
+  const { data: pending } = await supabase
+    .from("ladder_entries")
+    .select(`
+      id, match_id, selection, notes, odds, stake,
+      match:matches(
+        status, home_score, away_score,
+        home_team:teams!matches_home_team_id_fkey(name),
+        away_team:teams!matches_away_team_id_fkey(name)
+      )
+    `)
+    .eq("status", "pending")
+    .limit(200);
+
+  let resolved = 0;
+  for (const entry of pending ?? []) {
+    const match = (entry as any).match;
+    if (!match || match.status !== "finished" || match.home_score == null || match.away_score == null) continue;
+    const homeName = match.home_team?.name ?? "Local";
+    const awayName = match.away_team?.name ?? "Visitante";
+    const evaluation = evaluatePrimaryBet(entry.selection, Number(match.home_score), Number(match.away_score), homeName, awayName);
+    if (!evaluation.verifiable) continue;
+
+    const stake = Number(entry.stake);
+    const odds = Number(entry.odds);
+    const won = evaluation.correct;
+    await supabase.from("ladder_entries").update({
+      status: won ? "won" : "lost",
+      return_amount: won ? stake * odds : 0,
+      profit: won ? stake * odds - stake : -stake,
+      balance_after: won ? stake * odds : 0,
+      updated_at: new Date().toISOString(),
+    }).eq("id", entry.id);
+    resolved++;
+  }
+  return resolved;
 }
 
 // ============================================================
@@ -1632,7 +1705,8 @@ async function fullSync(date: string): Promise<{ matches_fetched: number; predic
   }
 
   const predictions = await generatePredictions(date);
-  return { matches_fetched: fetched, predictions_generated: predictions };
+  const evaluated = await evaluatePredictionResults();
+  return { matches_fetched: fetched, predictions_generated: predictions, evaluated };
 }
 
 // ============================================================
@@ -1779,7 +1853,8 @@ Deno.serve(async (req: Request) => {
               }
             }
           }
-          result = { updated };
+          const evaluated = await evaluatePredictionResults();
+          result = { updated, evaluated };
           break;
         }
         case "ingest_team_stats": {
@@ -1856,7 +1931,8 @@ Deno.serve(async (req: Request) => {
             }
           }
           const predictions = await generatePredictions(date);
-          result = { matches_fetched: ingested, predictions_generated: predictions };
+          const evaluated = await evaluatePredictionResults();
+          result = { matches_fetched: ingested, predictions_generated: predictions, evaluated };
           break;
         }
         case "full_sync":

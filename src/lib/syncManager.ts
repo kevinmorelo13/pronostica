@@ -173,6 +173,12 @@ export async function fullSync(date: string): Promise<{
     standings: allStandings,
   });
 
+  try {
+    await evaluateResults();
+  } catch (e) {
+    console.error('Evaluate after full sync:', (e as Error).message);
+  }
+
   return {
     matches_fetched: result.matches_fetched ?? 0,
     predictions_generated: result.predictions_generated ?? 0,

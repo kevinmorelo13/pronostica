@@ -168,11 +168,11 @@ export default function BacktestingPage() {
                   return (
                     <tr key={p.id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
                       <td className="px-4 py-3 text-gray-300">{homeName} vs {awayName}</td>
-                      <td className="px-4 py-3 text-white font-medium">{predLabel}</td>
-                      <td className="text-right px-4 py-3 text-gray-400">{maxProb.toFixed(0)}%</td>
+                      <td className="px-4 py-3 text-white font-medium">{p.best_bet ?? predLabel}</td>
+                      <td className="text-right px-4 py-3 text-gray-400">{(p.best_bet_probability ?? maxProb).toFixed(0)}%</td>
                       <td className="text-center px-4 py-3">
                         <span className={`text-xs font-bold px-2 py-1 rounded ${isCorrect ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
-                          {isCorrect ? 'ACERTÓ' : 'FALLÓ'}
+                          {isCorrect ? 'GANADA' : 'PERDIDA'}
                         </span>
                       </td>
                       <td className="text-center px-4 py-3 text-gray-400 text-xs capitalize">{p.confidence.replace('_', ' ')}</td>

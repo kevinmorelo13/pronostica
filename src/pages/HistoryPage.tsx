@@ -2,7 +2,9 @@ import { useState, useEffect } from 'react';
 import { History, Filter, CheckCircle, XCircle, Clock, BarChart3 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import EntityLogo from '@/components/EntityLogo';
-import { toLocaleDateString, toLocaleTimeString, confidenceBg, confidenceLabel } from '@/lib/utils';
+import { toLocaleDateString, confidenceBg, confidenceLabel } from '@/lib/utils';
+import { estimatedOdds, evaluateBetFromScore } from '@/lib/betting';
+import { evaluateResults } from '@/lib/syncManager';
 
 type HistoryRow = {
   id: string;
@@ -19,6 +21,7 @@ type HistoryRow = {
   generated_at: string;
   match: {
     match_date: string;
+    status: string;
     home_score: number | null;
     away_score: number | null;
     league: { name: string; logo: string | null } | null;
@@ -36,29 +39,64 @@ export default function HistoryPage() {
   const PAGE_SIZE = 20;
 
   useEffect(() => {
-    setLoading(true);
-    let q = supabase
-      .from('predictions')
-      .select(`
-        id, match_id, confidence, prediction_result, actual_outcome, best_bet, best_bet_probability, analysis,
-        home_probability, draw_probability, away_probability, generated_at,
-        match:matches!predictions_match_id_fkey(
-          match_date, home_score, away_score,
-          league:leagues(name, logo),
-          home_team:teams!matches_home_team_id_fkey(name, logo, short_name),
-          away_team:teams!matches_away_team_id_fkey(name, logo, short_name)
-        )
-      `)
-      .order('generated_at', { ascending: false })
-      .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
+    let cancelled = false;
+    const load = async () => {
+      setLoading(true);
+      try {
+        await evaluateResults();
+      } catch (e) {
+        console.error('No se pudieron evaluar resultados:', e);
+      }
+      let q = supabase
+        .from('predictions')
+        .select(`
+          id, match_id, confidence, prediction_result, actual_outcome, best_bet, best_bet_probability, analysis,
+          home_probability, draw_probability, away_probability, generated_at,
+          match:matches!predictions_match_id_fkey(
+            match_date, status, home_score, away_score,
+            league:leagues(name, logo),
+            home_team:teams!matches_home_team_id_fkey(name, logo, short_name),
+            away_team:teams!matches_away_team_id_fkey(name, logo, short_name)
+          )
+        `)
+        .order('generated_at', { ascending: false })
+        .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
-    if (filterResult !== 'all') q = q.eq('prediction_result', filterResult);
-    if (filterConfidence !== 'all') q = q.eq('confidence', filterConfidence);
+      if (filterResult !== 'all') q = q.eq('prediction_result', filterResult);
+      if (filterConfidence !== 'all') q = q.eq('confidence', filterConfidence);
 
-    q.then(({ data }) => {
-      setRows((data ?? []) as unknown as HistoryRow[]);
+      const { data } = await q;
+      if (cancelled) return;
+      const next = ((data ?? []) as unknown as HistoryRow[]).map((row) => {
+        const match = row.match;
+        if (
+          row.prediction_result === 'pending'
+          && match?.status === 'finished'
+          && match.home_score != null
+          && match.away_score != null
+        ) {
+          const evaluation = evaluateBetFromScore(
+            row.best_bet,
+            match.home_score,
+            match.away_score,
+            match.home_team?.name ?? 'Local',
+            match.away_team?.name ?? 'Visitante',
+          );
+          if (evaluation.verifiable) {
+            return {
+              ...row,
+              prediction_result: evaluation.correct ? 'correct' : 'incorrect',
+              actual_outcome: evaluation.actual,
+            };
+          }
+        }
+        return row;
+      });
+      setRows(next);
       setLoading(false);
-    });
+    };
+    load();
+    return () => { cancelled = true; };
   }, [filterResult, filterConfidence, page]);
 
   const resultIcon = (r: string) => {
@@ -68,8 +106,8 @@ export default function HistoryPage() {
   };
 
   const resultLabel = (r: string) => {
-    if (r === 'correct') return 'Acertado';
-    if (r === 'incorrect') return 'Fallido';
+    if (r === 'correct') return 'Ganada';
+    if (r === 'incorrect') return 'Perdida';
     return 'Pendiente';
   };
 
@@ -81,7 +119,7 @@ export default function HistoryPage() {
           <History size={22} className="text-blue-400" />
           <h1 className="text-2xl font-black text-neutral-900">Historial de pronósticos</h1>
         </div>
-        <p className="text-neutral-600 text-sm">Todos los pronósticos generados por el sistema, sin modificar.</p>
+        <p className="text-neutral-600 text-sm">Los resultados se marcan solos con el marcador final de ESPN: ganada o perdida, con la cuota estimada.</p>
       </div>
 
       {/* Filters */}
@@ -155,8 +193,11 @@ export default function HistoryPage() {
                   <span className="text-[11px] text-neutral-500">{toLocaleDateString(row.generated_at, 'dd/MM/yy')}</span>
                 </div>
 
-                <div className="hidden min-w-[190px] flex-shrink-0 text-right md:block">
+                <div className="hidden min-w-[210px] flex-shrink-0 text-right md:block">
                   <p className="truncate text-xs font-bold text-neutral-900">{row.best_bet ?? 'Sin apuesta principal'}</p>
+                  <p className="mt-1 text-[11px] font-bold text-neutral-600">
+                    {row.best_bet_probability != null ? `Cuota ${estimatedOdds(row.best_bet_probability).toFixed(2)} · ${row.best_bet_probability.toFixed(0)}%` : 'Sin cuota'}
+                  </p>
                   <p className={`mt-1 text-xs font-bold ${row.prediction_result === 'correct' ? 'text-neutral-900' : row.prediction_result === 'incorrect' ? 'text-red-600' : 'text-neutral-500'}`}>{resultLabel(row.prediction_result)}{row.actual_outcome ? ` · ${row.actual_outcome}` : ''}</p>
                 </div>
               </div>

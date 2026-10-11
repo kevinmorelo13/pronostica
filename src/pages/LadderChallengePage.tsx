@@ -4,14 +4,21 @@ import {
   ArrowRight, CheckCircle2, XCircle, Clock, Flame, Target,
   TrendingUp, TrendingDown, Wallet, Trophy, Info, RefreshCw, Calendar,
 } from 'lucide-react';
-import { supabase, type LadderEntry, type Prediction } from '@/lib/supabase';
-import { getTodayBogota, toLocaleDateString } from '@/lib/utils';
+import { supabase, type LadderEntry } from '@/lib/supabase';
+import { getBogotaDateRange, getTodayBogota, toLocaleDateString } from '@/lib/utils';
+import { estimatedOdds, SCORE_SETTLEABLE_MARKETS } from '@/lib/betting';
+import { evaluateResults } from '@/lib/syncManager';
 
 const INITIAL_BALANCE_KEY = 'ladder_initial_balance';
 const DEFAULT_INITIAL_BALANCE = 100000;
 const MAX_ODDS = 1.50;
-const BOOKMAKER_MARGIN = 0.06;
-const SEARCH_DAYS = 3;
+const SEARCH_DAYS = 5;
+
+function addDays(date: string, days: number): string {
+  const next = new Date(`${date}T12:00:00-05:00`);
+  next.setDate(next.getDate() + days);
+  return next.toISOString().slice(0, 10);
+}
 
 type MarketCandidate = {
   predictionId: string;
@@ -25,12 +32,6 @@ type MarketCandidate = {
   homeTeam: string;
   awayTeam: string;
 };
-
-function estimatedOdds(probability: number): number {
-  const fairOdds = 100 / probability;
-  const adjusted = fairOdds / (1 + BOOKMAKER_MARGIN);
-  return Math.max(1.01, Number(adjusted.toFixed(2)));
-}
 
 function formatCOP(value: number): string {
   return new Intl.NumberFormat('es-CO', {
@@ -114,42 +115,49 @@ export default function LadderChallengePage() {
 
   const loadAll = useCallback(async () => {
     setLoading(true);
+    try {
+      await evaluateResults();
+    } catch (e) {
+      console.error('No se pudieron evaluar resultados:', e);
+    }
 
     const today = getTodayBogota();
-    const startDate = `${today}T00:00:00.000Z`;
-    const futureDate = new Date();
-    futureDate.setDate(futureDate.getDate() + SEARCH_DAYS);
-    const endDate = `${futureDate.toISOString().slice(0, 10)}T23:59:59.999Z`;
+    const { start } = getBogotaDateRange(today);
+    const { end } = getBogotaDateRange(addDays(today, SEARCH_DAYS));
 
-    const [entriesRes, predsRes] = await Promise.all([
+    const [entriesRes, matchesRes] = await Promise.all([
       supabase.from('ladder_entries').select('*').order('step', { ascending: true }),
       supabase
-        .from('predictions')
+        .from('matches')
         .select(`
-          id, match_id, best_bet, best_bet_probability, best_bet_market,
-          home_probability, draw_probability, away_probability,
-          over15_probability, over25_probability, under25_probability,
-          over35_probability, btts_probability, additional_markets,
-          matches!inner(
-            match_date, status,
-            league:leagues(name),
-            home_team:teams!matches_home_team_id_fkey(short_name, name),
-            away_team:teams!matches_away_team_id_fkey(short_name, name)
+          id, match_date, status, home_score, away_score,
+          league:leagues(name),
+          home_team:teams!matches_home_team_id_fkey(short_name, name),
+          away_team:teams!matches_away_team_id_fkey(short_name, name),
+          prediction:predictions(
+            id, match_id, best_bet, best_bet_probability, best_bet_market,
+            home_probability, draw_probability, away_probability,
+            over15_probability, over25_probability, under25_probability,
+            over35_probability, btts_probability, additional_markets
           )
         `)
-        .gte('matches.match_date', startDate)
-        .lte('matches.match_date', endDate)
-        .in('matches.status', ['scheduled', 'live', 'halftime'])
-        .order('matches.match_date', { ascending: true }),
+        .gte('match_date', start)
+        .lte('match_date', end)
+        .in('status', ['scheduled', 'live', 'halftime', 'finished'])
+        .order('match_date', { ascending: true })
+        .limit(120),
     ]);
 
     setEntries((entriesRes.data ?? []) as unknown as LadderEntry[]);
 
     // Build candidates from ALL markets, not just best_bet
     const allCandidates: MarketCandidate[] = [];
-    for (const pred of (predsRes.data ?? []) as any[]) {
-      const match = pred.matches;
-      if (!match) continue;
+    const upcoming = ((matchesRes.data ?? []) as any[]).filter((match) =>
+      ['scheduled', 'live', 'halftime'].includes(match.status),
+    );
+    for (const match of upcoming) {
+      const pred = Array.isArray(match.prediction) ? match.prediction[0] : match.prediction;
+      if (!pred) continue;
       const homeName = match.home_team?.short_name ?? match.home_team?.name ?? 'Local';
       const awayName = match.away_team?.short_name ?? match.away_team?.name ?? 'Visitante';
       const leagueName = match.league?.name ?? '';
@@ -192,7 +200,7 @@ export default function LadderChallengePage() {
       // Additional markets from JSON
       if (pred.additional_markets && typeof pred.additional_markets === 'object') {
         for (const [marketName, options] of Object.entries(pred.additional_markets)) {
-          if (marketName === 'Goles') continue; // already covered above
+          if (marketName === 'Goles' || !SCORE_SETTLEABLE_MARKETS.has(marketName)) continue;
           for (const [optionLabel, prob] of Object.entries(options as Record<string, number>)) {
             markets.push({ market: marketName, label: optionLabel, probability: prob });
           }
@@ -200,12 +208,13 @@ export default function LadderChallengePage() {
       }
 
       for (const m of markets) {
+        if (!SCORE_SETTLEABLE_MARKETS.has(m.market)) continue;
         if (m.probability == null || m.probability <= 0) continue;
         const odds = estimatedOdds(m.probability);
         if (odds > MAX_ODDS || odds <= 1.0) continue;
         allCandidates.push({
           predictionId: pred.id,
-          matchId: pred.match_id,
+          matchId: match.id,
           market: m.market,
           label: m.label,
           probability: m.probability,
@@ -481,7 +490,7 @@ export default function LadderChallengePage() {
             ) : filteredCandidates.length === 0 ? (
               <div className="rounded-2xl border border-neutral-300 bg-white p-8 text-center">
                 <Target size={40} className="mx-auto mb-3 text-neutral-400" />
-                <p className="text-sm font-semibold text-neutral-700">No hay opciones con cuota menor o igual a {MAX_ODDS.toFixed(2)} en los proximos {SEARCH_DAYS} dias.</p>
+                <p className="text-sm font-semibold text-neutral-700">No hay opciones con cuota menor o igual a {MAX_ODDS.toFixed(2)} en los próximos {SEARCH_DAYS} días.</p>
                 <p className="mt-1 text-xs text-neutral-500">Vuelve mas tarde o intenta sincronizar los partidos.</p>
                 <Link to="/predicciones" className="mt-4 inline-flex items-center gap-1 text-sm font-bold text-neutral-900 hover:underline">
                   Ver todos los pronosticos <ArrowRight size={14} />
@@ -599,7 +608,7 @@ export default function LadderChallengePage() {
           <div className="flex items-start gap-2">
             <Info size={14} className="mt-0.5 shrink-0 text-neutral-500" />
             <p className="text-xs leading-5 text-neutral-600">
-              Las cuotas incluyen un margen aproximado del 6%, similar al de casas de apuestas. Los mercados de corners, tarjetas y disparos son estimaciones basadas en promedios del equipo. Los pronosticos son estimaciones estadisticas y no garantizan resultados.
+              Las cuotas incluyen un margen aproximado del 6%. Solo se muestran mercados que se pueden liquidar con el marcador final de ESPN (1X2, doble oportunidad y goles). Las apuestas pendientes se marcan ganadas o perdidas automaticamente.
             </p>
           </div>
         </div>
